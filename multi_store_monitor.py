@@ -3,26 +3,28 @@
 Multi-Store TCG Monitor
 =======================
 
-Watches several Australian Shopify-based game stores for One Piece TCG and
-Pokemon TCG products and pings a Discord webhook when:
+Watches several Australian game stores for One Piece TCG and Pokemon TCG
+products and pings a Discord webhook when:
 
   * a matching product is newly listed, or
   * a matching product comes back in stock (out-of-stock -> in-stock).
 
-Stores monitored (all run on Shopify):
-  * Good Games          https://www.goodgames.com.au
-  * General Games       https://www.generalgames.com.au
-  * Gaming Grounds      https://www.gaminggrounds.com.au
-  * HanHan Games        https://hanhangames.com
-  * Rhystic Nostalgia   https://rhysticnostalgiagaming.com.au
+Stores monitored:
+  * Good Games          https://www.goodgames.com.au          (Shopify)
+  * General Games       https://www.generalgames.com.au       (Shopify)
+  * Gaming Grounds      https://www.gaminggrounds.com.au      (Shopify)
+  * HanHan Games        https://hanhangames.com               (Shopify)
+  * Rhystic Nostalgia   https://rhysticnostalgiagaming.com.au (Shopify)
+  * Mind Games          https://www.m-g.com.au                (WooCommerce)
 
-Why Shopify JSON instead of HTML scraping?
-  Every Shopify store exposes a public, structured JSON catalog at
-  `/products.json` (and `/collections/<handle>/products.json`). It gives us
-  the title, vendor, product type, tags, images, price and — crucially — the
-  `available` flag for every variant. That is far more reliable and far
-  lighter than rendering pages with a headless browser, and it makes
-  restock detection trivial.
+How it reads stock without a headless browser:
+  * Shopify stores expose a public JSON catalog at `/products.json`
+    (and `/collections/<handle>/products.json`) with a per-variant
+    `available` flag.
+  * WooCommerce stores expose the public Store API at
+    `/wp-json/wc/store/v1/products` with an `is_in_stock` flag per product.
+  Both are structured, reliable, and far lighter than scraping HTML — and they
+  make restock detection trivial.
 
 Special-interest sets (these trigger a louder, @-mention alert):
   * Pokemon "Ascended Heroes"
@@ -65,19 +67,31 @@ CHECK_INTERVAL_SECONDS = 180  # 3 minutes
 # Polite delay between individual HTTP requests (seconds).
 REQUEST_DELAY = 1.0
 
-# Max pages of /products.json to walk per collection / catalog (250 items/page).
+# Max pages to walk per endpoint (Shopify: 250 items/page, WooCommerce: 100).
 MAX_PAGES = 25
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_state.json")
 
-# Stores to watch. `collections` narrows the scan to specific Shopify collection
-# handles (faster, less noise). Leave `collections` empty/None to scan the whole
-# catalog via /products.json. Unknown/renamed handles are skipped automatically,
-# and if every configured collection fails we fall back to the full catalog.
+# Stores to watch.
+#
+# Each store needs:
+#   name : display name
+#   base : site root URL (no trailing slash)
+#   type : "shopify" (default) or "woocommerce"
+#
+# Shopify stores may set:
+#   collections : list of Shopify collection handles to narrow the scan
+#                 (faster, less noise). Empty/omitted -> scan whole catalog.
+#                 Unknown handles are skipped; if all fail we scan the catalog.
+#
+# WooCommerce stores may set:
+#   search_terms : list of search queries used against the Store API
+#                  (defaults to ["one piece", "pokemon"] if omitted).
 STORES = [
     {
         "name": "Good Games",
         "base": "https://www.goodgames.com.au",
+        "type": "shopify",
         "collections": [
             "trading-card-games",
             "coming-soon-trading-card-games",
@@ -86,11 +100,13 @@ STORES = [
     {
         "name": "General Games",
         "base": "https://www.generalgames.com.au",
+        "type": "shopify",
         "collections": [],  # full-catalog scan, filtered by keyword
     },
     {
         "name": "Gaming Grounds",
         "base": "https://www.gaminggrounds.com.au",
+        "type": "shopify",
         "collections": [
             "one-piece",
             "pokemon",
@@ -99,16 +115,24 @@ STORES = [
     {
         "name": "HanHan Games",
         "base": "https://hanhangames.com",
+        "type": "shopify",
         "collections": [],  # full-catalog scan
     },
     {
         "name": "Rhystic Nostalgia Gaming",
         "base": "https://rhysticnostalgiagaming.com.au",
+        "type": "shopify",
         "collections": [
             "one-piece-sealed-instock",
             "all-one-piece-preorders",
             "pokemon",
         ],
+    },
+    {
+        "name": "Mind Games",
+        "base": "https://www.m-g.com.au",
+        "type": "woocommerce",
+        "search_terms": ["one piece", "pokemon"],
     },
 ]
 
@@ -128,6 +152,7 @@ TCG_TERMS = [
     "build & battle", "build and battle", "blister", "sleeved booster",
     "double pack", "gift collection", "extra booster", "ultra deck",
     "surprise box", "scene set", "deluxe pack", "championship pack",
+    "premium card collection",
 ]
 
 # Special-interest sets — louder alert + optional @-mention. Each entry is a
@@ -139,6 +164,9 @@ PRIORITY_SETS = {
     "One Piece — EB-06": ["eb-06", "eb06", "eb 06"],
 }
 
+# Default search terms used for WooCommerce stores when not overridden.
+DEFAULT_WOO_SEARCH_TERMS = ["one piece", "pokemon"]
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -147,25 +175,16 @@ USER_AGENT = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _product_text(product: dict) -> str:
-    """Flatten the searchable text of a Shopify product into one lowercase blob."""
-    parts = [
-        product.get("title", ""),
-        product.get("product_type", ""),
-        product.get("vendor", ""),
-        " ".join(product.get("tags", []) if isinstance(product.get("tags"), list) else [str(product.get("tags", ""))]),
-        product.get("handle", ""),
-    ]
-    return " ".join(p for p in parts if p).lower()
-
-
-def classify(product: dict):
+def classify(norm: dict):
     """
-    Decide whether a product is worth alerting on.
+    Decide whether a normalized product is worth alerting on.
+
+    `norm` is a normalized product dict (see normalize_* functions) with at
+    least 'text' (lowercase searchable blob) and 'product_type'.
 
     Returns (matched: bool, franchise: str|None, priority_label: str|None).
     """
-    text = _product_text(product)
+    text = norm.get("text", "")
 
     is_one_piece = any(t in text for t in ONE_PIECE_TERMS)
     is_pokemon = any(t in text for t in POKEMON_TERMS)
@@ -173,9 +192,8 @@ def classify(product: dict):
         return False, None, None
 
     is_tcg = any(t in text for t in TCG_TERMS)
-    # Treat a Shopify product_type that literally says "card game" as TCG.
-    ptype = product.get("product_type", "").lower()
-    if "card" in ptype:
+    # Treat a product type/category that literally says "card" as TCG.
+    if "card" in norm.get("product_type", "").lower():
         is_tcg = True
     if not is_tcg:
         return False, None, None
@@ -191,21 +209,75 @@ def classify(product: dict):
     return True, franchise, priority_label
 
 
-def product_availability(product: dict):
-    """Return (in_stock: bool, price: str) for a Shopify product."""
-    variants = product.get("variants", []) or []
+# ── NORMALIZATION ────────────────────────────────────────────────────────────
+# Both platforms get squashed into a common product shape:
+#   {id, title, url, in_stock, price, image, product_type, text}
+
+def _blob(*parts) -> str:
+    return " ".join(str(p) for p in parts if p).lower()
+
+
+def normalize_shopify(p: dict, base: str) -> dict:
+    variants = p.get("variants", []) or []
     in_stock = any(v.get("available") for v in variants)
     prices = [v.get("price") for v in variants if v.get("price")]
     price = f"${prices[0]}" if prices else "N/A"
-    return in_stock, price
+
+    images = p.get("images", []) or []
+    image = images[0].get("src", "") if images and isinstance(images[0], dict) else ""
+
+    handle = p.get("handle", "")
+    tags = p.get("tags", [])
+    tags_str = " ".join(tags) if isinstance(tags, list) else str(tags)
+    product_type = p.get("product_type", "")
+    title = p.get("title", handle)
+
+    return {
+        "id": p.get("id"),
+        "title": title,
+        "url": f"{base}/products/{handle}",
+        "in_stock": in_stock,
+        "price": price,
+        "image": image,
+        "product_type": product_type,
+        "text": _blob(title, product_type, p.get("vendor", ""), tags_str, handle),
+    }
 
 
-def product_image(product: dict) -> str:
-    images = product.get("images", []) or []
-    if images and isinstance(images[0], dict):
-        return images[0].get("src", "")
-    return ""
+def normalize_woocommerce(p: dict) -> dict:
+    in_stock = bool(p.get("is_in_stock"))
 
+    price = "N/A"
+    prices = p.get("prices") or {}
+    raw = prices.get("price")
+    if raw is not None:
+        try:
+            minor = int(prices.get("currency_minor_unit", 2))
+            symbol = prices.get("currency_symbol", "$")
+            price = f"{symbol}{int(raw) / (10 ** minor):.2f}"
+        except (ValueError, TypeError):
+            price = str(raw)
+
+    images = p.get("images", []) or []
+    image = images[0].get("src", "") if images and isinstance(images[0], dict) else ""
+
+    categories = p.get("categories", []) or []
+    cat_names = " ".join(c.get("name", "") for c in categories if isinstance(c, dict))
+    title = p.get("name", "")
+
+    return {
+        "id": p.get("id"),
+        "title": title,
+        "url": p.get("permalink", ""),
+        "in_stock": in_stock,
+        "price": price,
+        "image": image,
+        "product_type": cat_names,
+        "text": _blob(title, cat_names, p.get("sku", "")),
+    }
+
+
+# ── FETCHING ─────────────────────────────────────────────────────────────────
 
 def make_session() -> requests.Session:
     s = requests.Session()
@@ -217,10 +289,10 @@ def make_session() -> requests.Session:
     return s
 
 
-def fetch_json(session: requests.Session, url: str):
-    """GET a Shopify *.json endpoint, returning parsed JSON or None."""
+def fetch_json(session: requests.Session, url: str, params: dict = None):
+    """GET a JSON endpoint, returning parsed JSON or None."""
     try:
-        r = session.get(url, timeout=25)
+        r = session.get(url, params=params, timeout=25)
         if r.status_code == 404:
             return None
         r.raise_for_status()
@@ -230,17 +302,11 @@ def fetch_json(session: requests.Session, url: str):
         return None
 
 
-def fetch_products_from(session: requests.Session, base: str, path: str) -> list:
-    """
-    Walk a paginated Shopify products.json endpoint.
-
-    `path` is either "/products.json" or "/collections/<handle>/products.json".
-    Returns the full list of product dicts (possibly empty).
-    """
+def fetch_shopify_path(session, base: str, path: str) -> list:
+    """Walk a paginated Shopify products.json endpoint -> list of product dicts."""
     products = []
     for page in range(1, MAX_PAGES + 1):
-        url = f"{base}{path}?limit=250&page={page}"
-        data = fetch_json(session, url)
+        data = fetch_json(session, f"{base}{path}", {"limit": 250, "page": page})
         if not data:
             break
         batch = data.get("products", [])
@@ -248,42 +314,80 @@ def fetch_products_from(session: requests.Session, base: str, path: str) -> list
             break
         products.extend(batch)
         if len(batch) < 250:
-            break  # last page
+            break
         time.sleep(REQUEST_DELAY)
     return products
 
 
-def gather_store_products(session: requests.Session, store: dict) -> list:
-    """Collect all candidate products for a store, deduped by product id."""
+def gather_shopify(session, store: dict) -> list:
+    """Return normalized products for a Shopify store."""
     base = store["base"]
     collections = store.get("collections") or []
-    products = []
+    raw = []
 
     if collections:
         for handle in collections:
-            path = f"/collections/{handle}/products.json"
-            got = fetch_products_from(session, base, path)
+            got = fetch_shopify_path(session, base, f"/collections/{handle}/products.json")
             if got:
                 print(f"    collection '{handle}': {len(got)} products")
-                products.extend(got)
+                raw.extend(got)
             time.sleep(REQUEST_DELAY)
 
-    # Fall back to (or default to) the full catalog if no collection yielded data.
-    if not products:
+    if not raw:
         print("    scanning full catalog (/products.json)...")
-        products = fetch_products_from(session, base, "/products.json")
+        raw = fetch_shopify_path(session, base, "/products.json")
 
-    # Dedupe by product id.
+    return [normalize_shopify(p, base) for p in raw]
+
+
+def gather_woocommerce(session, store: dict) -> list:
+    """Return normalized products for a WooCommerce store via the Store API."""
+    base = store["base"]
+    terms = store.get("search_terms") or DEFAULT_WOO_SEARCH_TERMS
+    raw = []
+
+    for term in terms:
+        found_for_term = 0
+        for page in range(1, MAX_PAGES + 1):
+            data = fetch_json(
+                session,
+                f"{base}/wp-json/wc/store/v1/products",
+                {"per_page": 100, "page": page, "search": term},
+            )
+            # Store API returns a JSON array of products.
+            if not isinstance(data, list) or not data:
+                break
+            raw.extend(data)
+            found_for_term += len(data)
+            if len(data) < 100:
+                break
+            time.sleep(REQUEST_DELAY)
+        print(f"    search '{term}': {found_for_term} products")
+        time.sleep(REQUEST_DELAY)
+
+    return [normalize_woocommerce(p) for p in raw]
+
+
+def gather_store_products(session, store: dict) -> list:
+    """Collect normalized, deduped products for a store (any supported type)."""
+    stype = store.get("type", "shopify")
+    if stype == "woocommerce":
+        normalized = gather_woocommerce(session, store)
+    else:
+        normalized = gather_shopify(session, store)
+
     seen = set()
     unique = []
-    for p in products:
-        pid = p.get("id")
-        if pid in seen:
+    for n in normalized:
+        nid = n.get("id")
+        if nid in seen:
             continue
-        seen.add(pid)
-        unique.append(p)
+        seen.add(nid)
+        unique.append(n)
     return unique
 
+
+# ── STATE ────────────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if os.path.exists(STATE_FILE):
@@ -301,6 +405,8 @@ def save_state(state: dict):
         json.dump(state, f, indent=2)
     os.replace(tmp, STATE_FILE)
 
+
+# ── DISCORD ──────────────────────────────────────────────────────────────────
 
 def send_discord(*, store_name, product_url, title, description, color,
                  price, in_stock, image, priority_label=None):
@@ -329,7 +435,6 @@ def send_discord(*, store_name, product_url, title, description, color,
         embed["thumbnail"] = {"url": image}
 
     payload = {"embeds": [embed]}
-    # @-mention for special-interest sets so it actually pings the phone.
     if priority_label and DISCORD_USER_ID:
         payload["content"] = f"<@{DISCORD_USER_ID}>"
         payload["allowed_mentions"] = {"users": [DISCORD_USER_ID]}
@@ -342,12 +447,13 @@ def send_discord(*, store_name, product_url, title, description, color,
         print(f"    [discord] ✗ failed: {e}")
 
 
-def check_store(session: requests.Session, store: dict, prev_state: dict,
-                first_run: bool) -> dict:
+# ── CORE ─────────────────────────────────────────────────────────────────────
+
+def check_store(session, store: dict, prev_state: dict, first_run: bool) -> dict:
     """Check one store, fire alerts, and return its new state slice."""
     name = store["name"]
     base = store["base"]
-    print(f"  → {name}")
+    print(f"  → {name} ({store.get('type', 'shopify')})")
 
     products = gather_store_products(session, store)
     print(f"    {len(products)} products gathered")
@@ -355,24 +461,21 @@ def check_store(session: requests.Session, store: dict, prev_state: dict,
     new_state = {}
     matched_count = 0
 
-    for p in products:
-        matched, franchise, priority_label = classify(p)
+    for n in products:
+        matched, franchise, priority_label = classify(n)
         if not matched:
             continue
         matched_count += 1
 
-        pid = p.get("id")
-        key = f"{base}|{pid}"
-        handle = p.get("handle", "")
-        product_url = f"{base}/products/{handle}"
-        in_stock, price = product_availability(p)
-        image = product_image(p)
-        title_name = p.get("title", handle)
+        key = f"{base}|{n.get('id')}"
+        in_stock = n["in_stock"]
+        product_url = n["url"]
+        title_name = n["title"]
 
         new_state[key] = {
             "name": title_name,
             "in_stock": in_stock,
-            "price": price,
+            "price": n["price"],
             "url": product_url,
         }
 
@@ -382,7 +485,6 @@ def check_store(session: requests.Session, store: dict, prev_state: dict,
             continue  # baseline only — never alert on the very first scan
 
         if prev is None:
-            # Newly listed product matching our filters.
             print(f"    [NEW] {title_name} ({'in stock' if in_stock else 'oos'})")
             send_discord(
                 store_name=name,
@@ -390,11 +492,10 @@ def check_store(session: requests.Session, store: dict, prev_state: dict,
                 title="🆕 New Listing!" + (f"  {priority_label}" if priority_label else ""),
                 description=f"**[{title_name}]({product_url})**\nJust appeared at {name}.",
                 color=0x00FF7F if in_stock else 0xFFA500,
-                price=price, in_stock=in_stock, image=image,
+                price=n["price"], in_stock=in_stock, image=n["image"],
                 priority_label=priority_label,
             )
         elif not prev.get("in_stock") and in_stock:
-            # Restock: was out of stock, now available.
             print(f"    [RESTOCK] {title_name}")
             send_discord(
                 store_name=name,
@@ -402,7 +503,7 @@ def check_store(session: requests.Session, store: dict, prev_state: dict,
                 title="✅ Back In Stock!" + (f"  {priority_label}" if priority_label else ""),
                 description=f"**[{title_name}]({product_url})**\nJust became available at {name}!",
                 color=0x00FF00,
-                price=price, in_stock=in_stock, image=image,
+                price=n["price"], in_stock=in_stock, image=n["image"],
                 priority_label=priority_label,
             )
 
@@ -416,10 +517,9 @@ def run_cycle(prev_state: dict, first_run: bool) -> dict:
           + (" (baseline)" if first_run else "") + "...")
 
     session = make_session()
-    new_state = dict(prev_state)  # keep keys from stores we might skip this run
+    new_state = dict(prev_state)
 
     for store in STORES:
-        # Previous state slice for just this store (keys start with base url).
         store_prev = {k: v for k, v in prev_state.items()
                       if k.startswith(store["base"] + "|")}
         try:
@@ -428,7 +528,6 @@ def run_cycle(prev_state: dict, first_run: bool) -> dict:
             print(f"  [!] {store['name']} errored: {e} — keeping previous state")
             continue
 
-        # Replace this store's slice with the freshly scanned one.
         for k in list(new_state.keys()):
             if k.startswith(store["base"] + "|"):
                 del new_state[k]
@@ -482,7 +581,6 @@ def main():
             break
         except Exception as e:
             print(f"  [!] unexpected cycle error: {e}")
-        # small jitter so we don't hit every store on an exact cadence
         time.sleep(CHECK_INTERVAL_SECONDS + random.randint(0, 20))
 
 
