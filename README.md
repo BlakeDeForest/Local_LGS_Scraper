@@ -29,10 +29,22 @@ restock detection reliable and means no slow headless browser is needed.
 * Non-TCG items (plushies, figures, video games) and other card games
   (Magic, Yu-Gi-Oh!) are filtered out.
 
-### Special-interest sets (louder, @-mention alert)
+### Discord alert contents
 
-These trigger an extra-prominent alert and — if you set your Discord user ID —
-`@`-mention you so your phone actually buzzes:
+Every alert is a rich Discord embed showing **what the product is**, the
+**store**, the **game** (One Piece / Pokémon), the **product ID**, the
+**price**, the **stock status**, a product image, and a **Buy Now** link.
+
+### When you get @-pinged
+
+If you set your Discord user ID (Step 6 below), you get an `@`-mention (phone
+buzz: *"🔔 In stock now!"*) **only when a product is in stock** — i.e. restocks
+and any new listing that's already buyable. Out-of-stock / preorder listings
+still post to the channel, just **without** pinging you.
+
+### Special-interest sets (highlighted)
+
+These get an extra **🎯 Watched Set** highlight on the alert:
 
 * **Pokémon — Ascended Heroes**
 * **One Piece — OP-17**
@@ -132,10 +144,11 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "https://discord.com
 
 Save the file.
 
-**(Optional) get pinged personally** for the watched sets (Ascended Heroes /
-OP-17 / OP-18 / EB-06): in Discord enable **User Settings → Advanced →
-Developer Mode**, then right-click your name → **Copy User ID**, and paste it
-into the `DISCORD_USER_ID` line the same way.
+**(Optional) get pinged personally when something goes in stock:** in Discord
+enable **User Settings → Advanced → Developer Mode**, then right-click your name
+→ **Copy User ID**, and paste it into the `DISCORD_USER_ID` line the same way.
+You'll then be `@`-mentioned whenever a matching product is **in stock** (and not
+for out-of-stock listings).
 
 ## Step 7 — Run it
 

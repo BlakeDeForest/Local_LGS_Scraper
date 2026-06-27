@@ -55,10 +55,12 @@ import requests
 # "New Webhook" → Copy Webhook URL.  (See README for a step-by-step.)
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
-# Optional: your Discord numeric user ID. If set, "special-interest set" alerts
-# (Ascended Heroes / OP-17 / OP-18 / EB-06) will @-mention you so your phone
-# actually buzzes. Get it: Discord → User Settings → Advanced → enable
-# Developer Mode, then right-click your name → "Copy User ID".
+# Optional: your Discord numeric user ID. If set, you get @-mentioned (phone
+# buzz) ONLY when a matching product is IN STOCK — i.e. restocks and any
+# new listing that's already buyable. Out-of-stock / preorder listings still
+# post to the channel, but without pinging you. Get your ID: Discord →
+# User Settings → Advanced → enable Developer Mode, then right-click your name →
+# "Copy User ID".
 DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
 
 # How often to poll every store, in seconds.
@@ -408,8 +410,9 @@ def save_state(state: dict):
 
 # ── DISCORD ──────────────────────────────────────────────────────────────────
 
-def send_discord(*, store_name, product_url, title, description, color,
-                 price, in_stock, image, priority_label=None):
+def send_discord(*, store_name, product_name, product_id, product_url, franchise,
+                 title, description, color, price, in_stock, image,
+                 priority_label=None):
     if not DISCORD_WEBHOOK_URL:
         print("    [discord] (no webhook configured — skipping send)")
         return
@@ -420,7 +423,10 @@ def send_discord(*, store_name, product_url, title, description, color,
         "color": color,
         "url": product_url,
         "fields": [
+            {"name": "🃏 Product", "value": product_name, "inline": False},
             {"name": "Store", "value": store_name, "inline": True},
+            {"name": "Game", "value": franchise or "—", "inline": True},
+            {"name": "Product ID", "value": f"`{product_id}`", "inline": True},
             {"name": "Price", "value": price or "N/A", "inline": True},
             {"name": "Status",
              "value": "✅ In Stock" if in_stock else "📦 Out of Stock",
@@ -435,8 +441,11 @@ def send_discord(*, store_name, product_url, title, description, color,
         embed["thumbnail"] = {"url": image}
 
     payload = {"embeds": [embed]}
-    if priority_label and DISCORD_USER_ID:
-        payload["content"] = f"<@{DISCORD_USER_ID}>"
+    # @-mention you ONLY when the product is actually in stock (buyable now), so
+    # your phone buzzes for restocks / in-stock listings but not for
+    # out-of-stock or preorder listings.
+    if in_stock and DISCORD_USER_ID:
+        payload["content"] = f"<@{DISCORD_USER_ID}> 🔔 In stock now!"
         payload["allowed_mentions"] = {"users": [DISCORD_USER_ID]}
 
     try:
@@ -467,7 +476,8 @@ def check_store(session, store: dict, prev_state: dict, first_run: bool) -> dict
             continue
         matched_count += 1
 
-        key = f"{base}|{n.get('id')}"
+        product_id = n.get("id")
+        key = f"{base}|{product_id}"
         in_stock = n["in_stock"]
         product_url = n["url"]
         title_name = n["title"]
@@ -484,27 +494,33 @@ def check_store(session, store: dict, prev_state: dict, first_run: bool) -> dict
         if first_run:
             continue  # baseline only — never alert on the very first scan
 
+        common = dict(
+            store_name=name,
+            product_name=title_name,
+            product_id=product_id,
+            product_url=product_url,
+            franchise=franchise,
+            price=n["price"],
+            in_stock=in_stock,
+            image=n["image"],
+            priority_label=priority_label,
+        )
+
         if prev is None:
             print(f"    [NEW] {title_name} ({'in stock' if in_stock else 'oos'})")
             send_discord(
-                store_name=name,
-                product_url=product_url,
                 title="🆕 New Listing!" + (f"  {priority_label}" if priority_label else ""),
                 description=f"**[{title_name}]({product_url})**\nJust appeared at {name}.",
                 color=0x00FF7F if in_stock else 0xFFA500,
-                price=n["price"], in_stock=in_stock, image=n["image"],
-                priority_label=priority_label,
+                **common,
             )
         elif not prev.get("in_stock") and in_stock:
             print(f"    [RESTOCK] {title_name}")
             send_discord(
-                store_name=name,
-                product_url=product_url,
                 title="✅ Back In Stock!" + (f"  {priority_label}" if priority_label else ""),
                 description=f"**[{title_name}]({product_url})**\nJust became available at {name}!",
                 color=0x00FF00,
-                price=n["price"], in_stock=in_stock, image=n["image"],
-                priority_label=priority_label,
+                **common,
             )
 
     print(f"    {matched_count} matching TCG product(s) tracked")
