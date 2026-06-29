@@ -144,7 +144,9 @@ STORES = [
 ONE_PIECE_TERMS = ["one piece", "one-piece"]
 POKEMON_TERMS = ["pokemon", "pokémon", "pokemon tcg"]
 
-# ...AND look like a trading-card product (not a plushie, figure, video game...).
+# For Pokémon, a product must ALSO look like a trading-card product. (One Piece
+# is treated more broadly — see classify() — since these are card stores and we
+# want ancillary One Piece TCG product like the Heroines Gift Collection too.)
 TCG_TERMS = [
     "tcg", "trading card", "card game", "ccg",
     "booster", "booster box", "booster pack", "booster case",
@@ -154,7 +156,17 @@ TCG_TERMS = [
     "build & battle", "build and battle", "blister", "sleeved booster",
     "double pack", "gift collection", "extra booster", "ultra deck",
     "surprise box", "scene set", "deluxe pack", "championship pack",
-    "premium card collection",
+    "premium card collection", "booster bundle", "mini tin",
+]
+
+# Hard exclusions — clearly NOT trading cards. Anything matching is dropped even
+# if it mentions One Piece / Pokémon (figures, plush, video games, apparel...).
+EXCLUDE_TERMS = [
+    "plush", "plushie", "soft toy", "figure", "figurine", "funko", "nendoroid",
+    "statue", "model kit", "keychain", "key chain", "lanyard", "t-shirt",
+    "tshirt", "tee ", "hoodie", "apparel", "backpack", "wallet", "mug",
+    "poster", "manga", "dvd", "blu-ray", "blu ray", "soundtrack", "amiibo",
+    "nintendo switch", "playstation", "xbox", "video game", "pop! ",
 ]
 
 # Special-interest sets — louder alert + optional @-mention. Each entry is a
@@ -168,6 +180,69 @@ PRIORITY_SETS = {
 
 # Default search terms used for WooCommerce stores when not overridden.
 DEFAULT_WOO_SEARCH_TERMS = ["one piece", "pokemon"]
+
+# ── PRICE CAP / MSRP FILTER ──────────────────────────────────────────────────
+# Goal: only *@-mention you* (phone buzz) when an in-stock item is at or below a
+# sensible MSRP ceiling, so scalper-priced listings don't ping you. Items above
+# the cap still post quietly to the channel (no ping) unless ONLY_ALERT_AT_MSRP
+# is True, in which case they're dropped entirely.
+#
+# RRP varies by PRODUCT TYPE far more than by store, so caps are keyed by type.
+# These are AUD ceilings (a little above true RRP to allow normal shipping/markup
+# while still filtering out gougers). Tune freely. A booster pack RRP is ~$8.50
+# and a Pokémon booster box RRP is ~$306 as of 2025; One Piece boxes are cheaper.
+ENABLE_PRICE_CAP = True           # master switch for the whole feature
+ONLY_ALERT_AT_MSRP = True         # True = only post items at/under the cap
+
+# Caps are AUD ceilings keyed by FRANCHISE then PRODUCT TYPE, because RRP differs
+# by both. Within a franchise the first text match wins (order matters — most
+# specific first). Tune freely.
+#   * One Piece booster box capped at $250 (your max).
+#   * Pokémon booster box RRP is ~$306 (2025 price rise), so capped a bit above.
+PRICE_CAPS_BY_FRANCHISE = {
+    "One Piece": [
+        ("booster case", 1400),
+        ("booster box", 250),
+        ("booster display", 250),
+        ("extra booster", 160),       # EB-xx boxes are smaller/cheaper
+        ("gift collection", 95),      # e.g. Heroines [GC] Gift Collection
+        ("premium card collection", 95),
+        ("premium collection", 95),
+        ("ultra deck", 55),
+        ("starter deck", 45),
+        ("double pack", 45),
+        ("scene set", 70),
+        ("booster pack", 8),
+        ("booster", 250),             # generic fallback
+    ],
+    "Pokémon": [
+        ("booster case", 1900),
+        ("booster box", 330),
+        ("elite trainer", 90),
+        ("etb", 90),
+        ("premium collection", 95),
+        ("collection box", 95),
+        ("ex box", 95),
+        ("gift collection", 95),
+        ("build & battle", 60),
+        ("build and battle", 60),
+        ("booster bundle", 80),
+        ("tin", 55),
+        ("sleeved booster", 18),
+        ("blister", 28),
+        ("booster pack", 12),
+        ("booster", 330),             # generic fallback
+    ],
+}
+
+# Optional per-set overrides (take priority over the franchise/type table). Set
+# a number to cap a specific watched set; leave None to use the table above.
+PRICE_CAPS_BY_SET = {
+    "One Piece — OP-17": 250,
+    "One Piece — OP-18": 250,
+    "One Piece — EB-06": 160,
+    "Pokémon — Ascended Heroes": None,
+}
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -188,19 +263,25 @@ def classify(norm: dict):
     """
     text = norm.get("text", "")
 
+    # Drop obvious non-card merchandise outright.
+    if any(x in text for x in EXCLUDE_TERMS):
+        return False, None, None
+
     is_one_piece = any(t in text for t in ONE_PIECE_TERMS)
     is_pokemon = any(t in text for t in POKEMON_TERMS)
     if not (is_one_piece or is_pokemon):
         return False, None, None
 
-    is_tcg = any(t in text for t in TCG_TERMS)
-    # Treat a product type/category that literally says "card" as TCG.
-    if "card" in norm.get("product_type", "").lower():
-        is_tcg = True
-    if not is_tcg:
-        return False, None, None
-
     franchise = "One Piece" if is_one_piece else "Pokémon"
+
+    # One Piece: accept anything (these are card stores, and we want ancillary
+    # TCG product like the Heroines Gift Collection, decks, etc.) — the exclude
+    # list above has already removed figures/plush/manga.
+    # Pokémon: require a trading-card signal so we don't catch video games etc.
+    if franchise == "Pokémon":
+        is_tcg = any(t in text for t in TCG_TERMS) or "card" in norm.get("product_type", "").lower()
+        if not is_tcg:
+            return False, None, None
 
     priority_label = None
     for label, aliases in PRIORITY_SETS.items():
@@ -209,6 +290,30 @@ def classify(norm: dict):
             break
 
     return True, franchise, priority_label
+
+
+def price_cap_for(norm: dict, franchise, priority_label) -> float:
+    """Return the AUD ceiling for this product, or None if uncapped."""
+    if not ENABLE_PRICE_CAP:
+        return None
+    # Per-set override first.
+    if priority_label:
+        override = PRICE_CAPS_BY_SET.get(priority_label)
+        if override is not None:
+            return override
+    # Then the franchise + product-type table (first textual match wins).
+    text = norm.get("text", "")
+    for needle, cap in PRICE_CAPS_BY_FRANCHISE.get(franchise, []):
+        if needle in text:
+            return cap
+    return None
+
+
+def within_cap(price_value, cap) -> bool:
+    """True if the price is acceptable (no cap, or unknown price, or <= cap)."""
+    if cap is None or price_value is None:
+        return True
+    return price_value <= cap
 
 
 # ── NORMALIZATION ────────────────────────────────────────────────────────────
@@ -224,6 +329,12 @@ def normalize_shopify(p: dict, base: str) -> dict:
     in_stock = any(v.get("available") for v in variants)
     prices = [v.get("price") for v in variants if v.get("price")]
     price = f"${prices[0]}" if prices else "N/A"
+    price_value = None
+    if prices:
+        try:
+            price_value = float(prices[0])
+        except (TypeError, ValueError):
+            pass
 
     images = p.get("images", []) or []
     image = images[0].get("src", "") if images and isinstance(images[0], dict) else ""
@@ -240,6 +351,7 @@ def normalize_shopify(p: dict, base: str) -> dict:
         "url": f"{base}/products/{handle}",
         "in_stock": in_stock,
         "price": price,
+        "price_value": price_value,
         "image": image,
         "product_type": product_type,
         "text": _blob(title, product_type, p.get("vendor", ""), tags_str, handle),
@@ -250,13 +362,15 @@ def normalize_woocommerce(p: dict) -> dict:
     in_stock = bool(p.get("is_in_stock"))
 
     price = "N/A"
+    price_value = None
     prices = p.get("prices") or {}
     raw = prices.get("price")
     if raw is not None:
         try:
             minor = int(prices.get("currency_minor_unit", 2))
             symbol = prices.get("currency_symbol", "$")
-            price = f"{symbol}{int(raw) / (10 ** minor):.2f}"
+            price_value = int(raw) / (10 ** minor)
+            price = f"{symbol}{price_value:.2f}"
         except (ValueError, TypeError):
             price = str(raw)
 
@@ -273,6 +387,7 @@ def normalize_woocommerce(p: dict) -> dict:
         "url": p.get("permalink", ""),
         "in_stock": in_stock,
         "price": price,
+        "price_value": price_value,
         "image": image,
         "product_type": cat_names,
         "text": _blob(title, cat_names, p.get("sku", "")),
@@ -412,10 +527,17 @@ def save_state(state: dict):
 
 def send_discord(*, store_name, product_name, product_id, product_url, franchise,
                  title, description, color, price, in_stock, image,
-                 priority_label=None):
+                 priority_label=None, cap=None, within_cap=True, ping=False):
     if not DISCORD_WEBHOOK_URL:
         print("    [discord] (no webhook configured — skipping send)")
         return
+
+    if cap is None:
+        msrp_value = "No cap set"
+    elif within_cap:
+        msrp_value = f"✅ At/under cap (${cap:g})"
+    else:
+        msrp_value = f"⚠️ Above cap (${cap:g})"
 
     embed = {
         "title": title,
@@ -431,6 +553,7 @@ def send_discord(*, store_name, product_name, product_id, product_url, franchise
             {"name": "Status",
              "value": "✅ In Stock" if in_stock else "📦 Out of Stock",
              "inline": True},
+            {"name": "💰 MSRP Check", "value": msrp_value, "inline": True},
             {"name": "🛒 Buy Now", "value": f"[View Product]({product_url})", "inline": False},
         ],
         "footer": {"text": f"Multi-Store TCG Monitor • {datetime.now():%Y-%m-%d %H:%M:%S}"},
@@ -441,11 +564,9 @@ def send_discord(*, store_name, product_name, product_id, product_url, franchise
         embed["thumbnail"] = {"url": image}
 
     payload = {"embeds": [embed]}
-    # @-mention you ONLY when the product is actually in stock (buyable now), so
-    # your phone buzzes for restocks / in-stock listings but not for
-    # out-of-stock or preorder listings.
-    if in_stock and DISCORD_USER_ID:
-        payload["content"] = f"<@{DISCORD_USER_ID}> 🔔 In stock now!"
+    # @-mention you only when it's in stock AND at/under your price cap.
+    if ping and DISCORD_USER_ID:
+        payload["content"] = f"<@{DISCORD_USER_ID}> 🔔 In stock at your price!"
         payload["allowed_mentions"] = {"users": [DISCORD_USER_ID]}
 
     try:
@@ -479,13 +600,18 @@ def check_store(session, store: dict, prev_state: dict, first_run: bool) -> dict
         product_id = n.get("id")
         key = f"{base}|{product_id}"
         in_stock = n["in_stock"]
+        price_value = n.get("price_value")
         product_url = n["url"]
         title_name = n["title"]
+
+        cap = price_cap_for(n, franchise, priority_label)
+        now_within = within_cap(price_value, cap)
 
         new_state[key] = {
             "name": title_name,
             "in_stock": in_stock,
             "price": n["price"],
+            "price_value": price_value,
             "url": product_url,
         }
 
@@ -494,7 +620,47 @@ def check_store(session, store: dict, prev_state: dict, first_run: bool) -> dict
         if first_run:
             continue  # baseline only — never alert on the very first scan
 
-        common = dict(
+        prev_in_stock = bool(prev.get("in_stock")) if prev else False
+        prev_within = within_cap(prev.get("price_value"), cap) if prev else False
+
+        # Decide what (if anything) happened that's worth an alert.
+        reason = None
+        if prev is None:
+            reason = "new"
+        elif not prev_in_stock and in_stock:
+            reason = "restock"
+        elif prev_in_stock and in_stock and not prev_within and now_within:
+            reason = "msrp_drop"   # was over cap, now dropped to your price
+        if reason is None:
+            continue
+
+        # If you only want MSRP-or-under alerts, drop over-cap items entirely.
+        if ONLY_ALERT_AT_MSRP and not now_within:
+            continue
+
+        # @-ping only when it's both in stock AND at/under your cap.
+        ping = in_stock and now_within and bool(DISCORD_USER_ID)
+
+        titles = {
+            "new": "🆕 New Listing!",
+            "restock": "✅ Back In Stock!",
+            "msrp_drop": "💰 Now at your price!",
+        }
+        descs = {
+            "new": f"**[{title_name}]({product_url})**\nJust appeared at {name}.",
+            "restock": f"**[{title_name}]({product_url})**\nJust became available at {name}!",
+            "msrp_drop": f"**[{title_name}]({product_url})**\nPrice just dropped to within your cap at {name}!",
+        }
+        colors = {
+            "new": 0x00FF7F if in_stock else 0xFFA500,
+            "restock": 0x00FF00,
+            "msrp_drop": 0x00BFFF,
+        }
+        print(f"    [{reason.upper()}] {title_name} "
+              f"({'in stock' if in_stock else 'oos'}, {n['price']}, "
+              f"{'<=cap' if now_within else '>cap'})")
+
+        send_discord(
             store_name=name,
             product_name=title_name,
             product_id=product_id,
@@ -504,26 +670,15 @@ def check_store(session, store: dict, prev_state: dict, first_run: bool) -> dict
             in_stock=in_stock,
             image=n["image"],
             priority_label=priority_label,
+            cap=cap,
+            within_cap=now_within,
+            ping=ping,
+            title=titles[reason] + (f"  {priority_label}" if priority_label else ""),
+            description=descs[reason],
+            color=colors[reason],
         )
 
-        if prev is None:
-            print(f"    [NEW] {title_name} ({'in stock' if in_stock else 'oos'})")
-            send_discord(
-                title="🆕 New Listing!" + (f"  {priority_label}" if priority_label else ""),
-                description=f"**[{title_name}]({product_url})**\nJust appeared at {name}.",
-                color=0x00FF7F if in_stock else 0xFFA500,
-                **common,
-            )
-        elif not prev.get("in_stock") and in_stock:
-            print(f"    [RESTOCK] {title_name}")
-            send_discord(
-                title="✅ Back In Stock!" + (f"  {priority_label}" if priority_label else ""),
-                description=f"**[{title_name}]({product_url})**\nJust became available at {name}!",
-                color=0x00FF00,
-                **common,
-            )
-
-    print(f"    {matched_count} matching TCG product(s) tracked")
+    print(f"    {matched_count} matching product(s) tracked")
     return new_state
 
 

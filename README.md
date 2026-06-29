@@ -23,11 +23,28 @@ restock detection reliable and means no slow headless browser is needed.
 
 ## What it alerts on
 
-* **Anything One Piece TCG** (booster boxes, extra boosters, starter decks,
-  displays, premium collections, double packs, etc.).
+* **Anything One Piece** TCG — including **ancillary product** like the
+  Heroines Gift Collection, premium collections, starter/ultra decks, double
+  packs, plus boxes/displays/packs.
 * **Anything Pokémon TCG** (booster boxes, ETBs, tins, collections, etc.).
-* Non-TCG items (plushies, figures, video games) and other card games
-  (Magic, Yu-Gi-Oh!) are filtered out.
+* Non-card merchandise (plushies, figures, Funko, manga, apparel, video games)
+  and other card games (Magic, Yu-Gi-Oh!) are filtered out.
+
+## MSRP / price cap
+
+Lots of stores list hyped sets well above RRP. To avoid being pinged for
+gouged prices, the monitor has a **price cap** (on by default):
+
+* You only get **@-pinged** when an item is **in stock AND at/under a price
+  ceiling**. One Piece **booster boxes are capped at $250**; Pokémon boxes a bit
+  higher (RRP ~$306). Caps are set per game and per product type at the top of
+  `multi_store_monitor.py` (`PRICE_CAPS_BY_FRANCHISE`, `PRICE_CAPS_BY_SET`).
+* With `ONLY_ALERT_AT_MSRP = True` (the default) items over the cap are skipped
+  entirely. Set it to `False` to still see them in the channel (just without a
+  ping).
+* If a store **drops a price** into your range while it's in stock, you get a
+  **💰 Now at your price!** alert.
+* Every alert shows a **💰 MSRP Check** field (✅ at/under cap or ⚠️ above).
 
 ### Discord alert contents
 
@@ -38,9 +55,10 @@ Every alert is a rich Discord embed showing **what the product is**, the
 ### When you get @-pinged
 
 If you set your Discord user ID (Step 6 below), you get an `@`-mention (phone
-buzz: *"🔔 In stock now!"*) **only when a product is in stock** — i.e. restocks
-and any new listing that's already buyable. Out-of-stock / preorder listings
-still post to the channel, just **without** pinging you.
+buzz: *"🔔 In stock at your price!"*) **only when a product is in stock AND
+at/under your price cap**. Out-of-stock / preorder / over-cap listings don't
+ping you (and with the default `ONLY_ALERT_AT_MSRP = True`, over-cap items are
+hidden entirely).
 
 ### Special-interest sets (highlighted)
 
@@ -186,8 +204,11 @@ All knobs live at the top of `multi_store_monitor.py`:
 |---------|--------------|
 | `CHECK_INTERVAL_SECONDS` | How often to poll (default 180s = 3 min). |
 | `STORES` | Add/remove stores. Each has `name`, `base`, `type` (`shopify` or `woocommerce`), and either `collections` (Shopify) or `search_terms` (WooCommerce). |
-| `PRIORITY_SETS` | Sets that get the louder @-mention alert (add OP-19, future sets, etc.). |
-| `TCG_TERMS` / `ONE_PIECE_TERMS` / `POKEMON_TERMS` | Keyword filters that decide what counts as a match. |
+| `PRIORITY_SETS` | Sets that get a 🎯 highlight (add OP-19, future sets, etc.). |
+| `ENABLE_PRICE_CAP` / `ONLY_ALERT_AT_MSRP` | Turn the MSRP filter on/off; whether over-cap items are hidden or just shown without a ping. |
+| `PRICE_CAPS_BY_FRANCHISE` | Per-game, per-product-type price ceilings (e.g. One Piece booster box = $250). |
+| `PRICE_CAPS_BY_SET` | Exact cap for a specific watched set (overrides the table). |
+| `TCG_TERMS` / `EXCLUDE_TERMS` / `ONE_PIECE_TERMS` / `POKEMON_TERMS` | Keyword filters that decide what counts (and what's excluded). |
 | `MAX_PAGES` | Cap on pages walked per store. |
 
 ### Adding another store
